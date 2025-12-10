@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, createContext, useContext, ReactNode } from "react";
 import { Task, Priority } from "@/types/task";
 
 const generateId = () => Math.random().toString(36).substring(2, 9);
@@ -10,7 +10,7 @@ const initialTasks: Task[] = [
     description: "Go through the Q1 project proposal and provide feedback",
     completed: false,
     priority: "high",
-    dueDate: new Date(Date.now() + 86400000), // Tomorrow
+    dueDate: new Date(), // Today
     createdAt: new Date(),
   },
   {
@@ -18,6 +18,7 @@ const initialTasks: Task[] = [
     title: "Team standup meeting",
     completed: true,
     priority: "medium",
+    dueDate: new Date(),
     createdAt: new Date(Date.now() - 3600000),
   },
   {
@@ -29,9 +30,35 @@ const initialTasks: Task[] = [
     dueDate: new Date(Date.now() + 86400000 * 3), // 3 days
     createdAt: new Date(Date.now() - 7200000),
   },
+  {
+    id: generateId(),
+    title: "Client presentation",
+    description: "Prepare slides for the quarterly review",
+    completed: false,
+    priority: "high",
+    dueDate: new Date(Date.now() + 86400000 * 5), // 5 days
+    createdAt: new Date(),
+  },
+  {
+    id: generateId(),
+    title: "Code review",
+    completed: false,
+    priority: "medium",
+    dueDate: new Date(Date.now() + 86400000), // Tomorrow
+    createdAt: new Date(),
+  },
 ];
 
-export function useTasks() {
+interface TasksContextType {
+  tasks: Task[];
+  addTask: (title: string, priority: Priority, dueDate?: Date) => void;
+  toggleTask: (id: string) => void;
+  deleteTask: (id: string) => void;
+}
+
+const TasksContext = createContext<TasksContextType | undefined>(undefined);
+
+export function TasksProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<Task[]>(initialTasks);
 
   const addTask = useCallback((title: string, priority: Priority, dueDate?: Date) => {
@@ -58,10 +85,17 @@ export function useTasks() {
     setTasks((prev) => prev.filter((task) => task.id !== id));
   }, []);
 
-  return {
-    tasks,
-    addTask,
-    toggleTask,
-    deleteTask,
-  };
+  return (
+    <TasksContext.Provider value={{ tasks, addTask, toggleTask, deleteTask }}>
+      {children}
+    </TasksContext.Provider>
+  );
+}
+
+export function useTasks() {
+  const context = useContext(TasksContext);
+  if (!context) {
+    throw new Error("useTasks must be used within a TasksProvider");
+  }
+  return context;
 }
