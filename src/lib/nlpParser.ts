@@ -313,7 +313,7 @@ function parseAbsoluteDate(normalized: string, today: Date): { date: Date; match
   }
 
   // Pattern 3: "on 12/12" or "12/12" or "12-12" (day/month format, assuming current year)
-  const pattern3 = normalized.match(/(?:on\s+)?(\d{1,2})[\/\-](\d{1,2})\b/);
+  const pattern3 = normalized.match(/(?:on\s+)?(\d{1,2})[/-](\d{1,2})\b/);
   if (pattern3) {
     const day = parseInt(pattern3[1]);
     const month = parseInt(pattern3[2]) - 1; // Month is 0-indexed
@@ -374,8 +374,8 @@ function parseOrdinalWeekdayDate(
   const patterns: RegExp[] = [
     // "first monday of next month", "3rd sat in this month"
     /\b(first|second|third|fourth|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(?:of|in)\s+(this|next)\s+month\b/,
-    // "next month first monday"
-    /\b(next|this)\s+month\s+(first|second|third|fourth|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/,
+    // "next month first monday", "next month of second saturday"
+    /\b(next|this)\s+month\s+(?:of\s+)?(first|second|third|fourth|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/,
     // "second tuesday next month"
     /\b(first|second|third|fourth|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(this|next)\s+month\b/,
   ];
