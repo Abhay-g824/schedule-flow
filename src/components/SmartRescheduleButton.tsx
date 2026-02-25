@@ -39,7 +39,7 @@ export function SmartRescheduleButton() {
       const updates =
         aiResult.updates.length > 0
           ? aiResult.updates
-          : calculateRescheduleUpdates(tasks);
+          : calculateRescheduleUpdates(tasks, startDate);
 
             if (updates.length === 0) {
                 alert("Could not find free slots for overdue tasks starting from selected time.");

@@ -266,11 +266,16 @@ export function smartRescheduleOverdueTasks(
   const workdayEndHour = preferences.workdayEndHour ?? 18;
 
   try {
+    // Overdue is always computed relative to "today", to stay in sync
+    // with the existing `findOverdueTasks` implementation that powers
+    // the overdue counter in the UI. The `startFrom` date only affects
+    // where we *reschedule* tasks, not which ones are considered overdue.
+    const todayStart = startOfDay(new Date());
+
     const overdue = allTasks.filter((task) => {
       if (task.completed) return false;
       if (!task.dueDate) return false;
       const dueStart = startOfDay(task.dueDate);
-      const todayStart = startOfDay(startFrom);
       return isBefore(dueStart, todayStart);
     });
 
@@ -278,8 +283,10 @@ export function smartRescheduleOverdueTasks(
       return { updates: [], confidence: 1 };
     }
 
-    // Delegate base scheduling to existing logic for backward compatibility.
-    const baseUpdates = calculateRescheduleUpdates(allTasks);
+    // Delegate base scheduling to existing logic for backward compatibility,
+    // but anchor the search to `startFrom` so that downstream adjustments
+    // never move tasks earlier than the user-selected date.
+    const baseUpdates = calculateRescheduleUpdates(allTasks, startFrom);
 
     const adjustedUpdates = baseUpdates.map((update) => {
       const next = { ...update, updates: { ...update.updates } };
@@ -289,6 +296,12 @@ export function smartRescheduleOverdueTasks(
       }
 
       let targetDate = startOfDay(next.updates.dueDate);
+
+      // Never move tasks earlier than the chosen `startFrom` date.
+      const minDate = startOfDay(startFrom);
+      if (isBefore(targetDate, minDate)) {
+        targetDate = minDate;
+      }
 
       if (avoidWeekends) {
         while (isWeekend(targetDate)) {

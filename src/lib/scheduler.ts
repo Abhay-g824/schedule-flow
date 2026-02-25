@@ -97,15 +97,21 @@ function findNextAvailableSlot(
 /**
  * Main function to generate updates.
  * Strategy:
- * 1. Find overdue tasks.
- * 2. Try to schedule them Today.
+ * 1. Find overdue tasks (relative to *today*).
+ * 2. Try to schedule them starting from the provided date (defaults to Today).
  * 3. Returns a list of updates to be applied.
+ *
+ * NOTE: The `startFrom` argument is optional and keeps this API
+ * backwards-compatible for existing callers that always want "today".
  */
-export function calculateRescheduleUpdates(allTasks: Task[]): RescheduleUpdate[] {
+export function calculateRescheduleUpdates(
+    allTasks: Task[],
+    startFrom?: Date
+): RescheduleUpdate[] {
     const overdue = findOverdueTasks(allTasks);
     if (overdue.length === 0) return [];
 
-    const today = new Date();
+    const today = startFrom ? new Date(startFrom) : new Date();
     // Tasks already scheduled for today
     const tasksToday = allTasks.filter(t =>
         t.dueDate && isSameDay(t.dueDate, today) && !t.completed
