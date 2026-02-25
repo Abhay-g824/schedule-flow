@@ -1,92 +1,184 @@
-import { useState, useCallback, createContext, useContext, ReactNode } from "react";
+import { useState, useCallback, createContext, useContext, ReactNode, useEffect } from "react";
 import { Task, Priority } from "@/types/task";
-
-const generateId = () => Math.random().toString(36).substring(2, 9);
-
-const initialTasks: Task[] = [
-  {
-    id: generateId(),
-    title: "Review project proposal",
-    description: "Go through the Q1 project proposal and provide feedback",
-    completed: false,
-    priority: "high",
-    dueDate: new Date(), // Today
-    createdAt: new Date(),
-  },
-  {
-    id: generateId(),
-    title: "Team standup meeting",
-    completed: true,
-    priority: "medium",
-    dueDate: new Date(),
-    createdAt: new Date(Date.now() - 3600000),
-  },
-  {
-    id: generateId(),
-    title: "Update documentation",
-    description: "Update the API documentation with new endpoints",
-    completed: false,
-    priority: "low",
-    dueDate: new Date(Date.now() + 86400000 * 3), // 3 days
-    createdAt: new Date(Date.now() - 7200000),
-  },
-  {
-    id: generateId(),
-    title: "Client presentation",
-    description: "Prepare slides for the quarterly review",
-    completed: false,
-    priority: "high",
-    dueDate: new Date(Date.now() + 86400000 * 5), // 5 days
-    createdAt: new Date(),
-  },
-  {
-    id: generateId(),
-    title: "Code review",
-    completed: false,
-    priority: "medium",
-    dueDate: new Date(Date.now() + 86400000), // Tomorrow
-    createdAt: new Date(),
-  },
-];
+import { useAuth } from "./useAuth";
 
 interface TasksContextType {
   tasks: Task[];
-  addTask: (title: string, priority: Priority, dueDate?: Date) => void;
-  toggleTask: (id: string) => void;
-  deleteTask: (id: string) => void;
+  loading: boolean;
+  addTask: (title: string, priority: Priority, dueDate?: Date, color?: string | null, reminderTime?: Date, timeSlotStart?: Date, timeSlotEnd?: Date) => Promise<void>;
+  toggleTask: (id: string) => Promise<void>;
+  deleteTask: (id: string) => Promise<void>;
+  updateTask: (id: string, updates: Partial<Task>) => Promise<void>;
+  fetchTasks: () => Promise<void>;
 }
 
 const TasksContext = createContext<TasksContextType | undefined>(undefined);
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3001";
+
+function mapApiTask(row: any): Task {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description ?? undefined,
+    completed: !!row.completed,
+    priority: row.priority as Priority,
+    dueDate: row.due_date ? new Date(row.due_date) : undefined,
+    createdAt: row.created_at ? new Date(row.created_at) : new Date(),
+    color: row.color ?? undefined,
+    timeSlotStart: row.time_slot_start ? new Date(row.time_slot_start) : undefined,
+    timeSlotEnd: row.time_slot_end ? new Date(row.time_slot_end) : undefined,
+    reminderTime: row.reminder_time ? new Date(row.reminder_time) : undefined,
+    category: row.category ?? undefined,
+  };
+}
+
 export function TasksProvider({ children }: { children: ReactNode }) {
-  const [tasks, setTasks] = useState<Task[]>(initialTasks);
+  const { token } = useAuth();
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  const addTask = useCallback((title: string, priority: Priority, dueDate?: Date) => {
-    const newTask: Task = {
-      id: generateId(),
-      title,
-      completed: false,
-      priority,
-      dueDate,
-      createdAt: new Date(),
-    };
-    setTasks((prev) => [newTask, ...prev]);
-  }, []);
+  const fetchTasks = useCallback(async () => {
+    if (!token) {
+      setTasks([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_URL}/tasks`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error("Failed to load tasks");
+      const data = await res.json();
+      setTasks(data.map(mapApiTask));
+    } catch (err: any) {
+      // Error handling - tasks will remain in previous state
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
 
-  const toggleTask = useCallback((id: string) => {
-    setTasks((prev) =>
-      prev.map((task) =>
-        task.id === id ? { ...task, completed: !task.completed } : task
-      )
-    );
-  }, []);
+  useEffect(() => {
+    fetchTasks();
+  }, [fetchTasks]);
 
-  const deleteTask = useCallback((id: string) => {
-    setTasks((prev) => prev.filter((task) => task.id !== id));
-  }, []);
+  const addTask = useCallback(
+    async (title: string, priority: Priority, dueDate?: Date, color?: string | null, reminderTime?: Date, timeSlotStart?: Date, timeSlotEnd?: Date) => {
+      if (!token) return;
+      const requestBody = { 
+        title, 
+        priority, 
+        dueDate: dueDate?.toISOString(),
+        color: color || null,
+        reminderTime: reminderTime?.toISOString() || null,
+        timeSlotStart: timeSlotStart?.toISOString() || null,
+        timeSlotEnd: timeSlotEnd?.toISOString() || null,
+      };
+      const res = await fetch(`${API_URL}/tasks`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(requestBody),
+      });
+      if (!res.ok) throw new Error("Failed to add task");
+      const data = await res.json();
+      const newTask = mapApiTask(data);
+      setTasks((prev) => [newTask, ...prev]);
+      
+      // Schedule notification if reminder time is set
+      if (reminderTime && 'Notification' in window && Notification.permission === 'granted') {
+        scheduleNotification(newTask, reminderTime);
+      } else if (reminderTime && 'Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().then((permission) => {
+          if (permission === 'granted') {
+            scheduleNotification(newTask, reminderTime);
+          }
+        });
+      }
+    },
+    [token]
+  );
+
+  const scheduleNotification = (task: Task, reminderTime: Date) => {
+    const now = new Date();
+    const timeUntilReminder = reminderTime.getTime() - now.getTime();
+    
+    if (timeUntilReminder > 0) {
+      setTimeout(() => {
+        new Notification(`Task Reminder: ${task.title}`, {
+          body: task.description || `Don't forget: ${task.title}`,
+          icon: '/favicon.ico',
+          tag: task.id,
+        });
+      }, timeUntilReminder);
+    }
+  };
+
+  const toggleTask = useCallback(
+    async (id: string) => {
+      if (!token) return;
+      const task = tasks.find((t) => t.id === id);
+      if (!task) return;
+      const res = await fetch(`${API_URL}/tasks/${id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ completed: task.completed ? 0 : 1 }),
+      });
+      if (!res.ok) throw new Error("Failed to update task");
+      const data = await res.json();
+      setTasks((prev) => prev.map((t) => (t.id === id ? mapApiTask(data) : t)));
+    },
+    [tasks, token]
+  );
+
+  const deleteTask = useCallback(
+    async (id: string) => {
+      if (!token) return;
+      const res = await fetch(`${API_URL}/tasks/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error("Failed to delete task");
+      setTasks((prev) => prev.filter((t) => t.id !== id));
+    },
+    [token]
+  );
+
+  const updateTask = useCallback(
+    async (id: string, updates: Partial<Task>) => {
+      if (!token) return;
+      const res = await fetch(`${API_URL}/tasks/${id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          title: updates.title,
+          priority: updates.priority,
+          description: updates.description,
+          dueDate: updates.dueDate ? updates.dueDate.toISOString() : undefined,
+          color: updates.color,
+          timeSlotStart: updates.timeSlotStart ? updates.timeSlotStart.toISOString() : undefined,
+          timeSlotEnd: updates.timeSlotEnd ? updates.timeSlotEnd.toISOString() : undefined,
+          reminderTime: updates.reminderTime ? updates.reminderTime.toISOString() : undefined,
+          category: updates.category,
+        }),
+      });
+      if (!res.ok) throw new Error("Failed to update task");
+      const data = await res.json();
+      setTasks((prev) => prev.map((t) => (t.id === id ? mapApiTask(data) : t)));
+    },
+    [token]
+  );
 
   return (
-    <TasksContext.Provider value={{ tasks, addTask, toggleTask, deleteTask }}>
+    <TasksContext.Provider value={{ tasks, loading, addTask, toggleTask, deleteTask, updateTask, fetchTasks }}>
       {children}
     </TasksContext.Provider>
   );

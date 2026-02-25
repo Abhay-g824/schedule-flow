@@ -1,23 +1,33 @@
 import { useState, useMemo } from "react";
-import { NavLink } from "react-router-dom";
-import { CalendarDays, CalendarCheck, CalendarRange, Calendar, LayoutDashboard, CheckCircle2 } from "lucide-react";
+import { ListChecks } from "lucide-react";
 import { useTasks } from "@/hooks/useTasks";
+import { useTemplates } from "@/hooks/useTemplates";
 import { AddTaskForm } from "@/components/AddTaskForm";
+import { AITaskForm } from "@/components/AITaskForm";
+import { TemplatesList } from "@/components/TemplatesList";
+import { SmartRescheduleButton } from "@/components/SmartRescheduleButton";
+import { ProductivityStats } from "@/components/ProductivityStats";
 import { TaskList } from "@/components/TaskList";
+import { TaskFilters, FilterOptions } from "@/components/TaskFilters";
 import { FilterTabs, FilterType } from "@/components/FilterTabs";
 import { cn } from "@/lib/utils";
-
-const navigationItems = [
-  { title: "Dashboard", url: "/", icon: LayoutDashboard },
-  { title: "Today", url: "/today", icon: CalendarCheck },
-  { title: "This Week", url: "/week", icon: CalendarDays },
-  { title: "This Month", url: "/month", icon: CalendarRange },
-  { title: "Calendar", url: "/calendar", icon: Calendar },
-];
+import { Button } from "@/components/ui/button";
+import { Task, Priority } from "@/types/task";
+import { isWithinInterval, startOfDay, endOfDay } from "date-fns";
 
 const Index = () => {
-  const { tasks, addTask, toggleTask, deleteTask } = useTasks();
+  const { tasks, addTask, toggleTask, deleteTask, updateTask } = useTasks();
+  const { createTemplate } = useTemplates();
   const [filter, setFilter] = useState<FilterType>("all");
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedTasks, setSelectedTasks] = useState<Set<string>>(new Set());
+  const [advancedFilters, setAdvancedFilters] = useState<FilterOptions>({
+    search: "",
+    priority: "all",
+    color: "all",
+    completed: "all",
+    dateRange: { start: null, end: null },
+  });
 
   const counts = useMemo(() => ({
     all: tasks.length,
@@ -26,15 +36,108 @@ const Index = () => {
   }), [tasks]);
 
   const filteredTasks = useMemo(() => {
+    let result = tasks;
+
+    // Apply basic filter (all/active/completed)
     switch (filter) {
       case "active":
-        return tasks.filter((t) => !t.completed);
+        result = result.filter((t) => !t.completed);
+        break;
       case "completed":
-        return tasks.filter((t) => t.completed);
-      default:
-        return tasks;
+        result = result.filter((t) => t.completed);
+        break;
     }
-  }, [tasks, filter]);
+
+    // Apply advanced filters
+    if (advancedFilters.search) {
+      const searchLower = advancedFilters.search.toLowerCase();
+      result = result.filter((t) =>
+        t.title.toLowerCase().includes(searchLower) ||
+        t.description?.toLowerCase().includes(searchLower)
+      );
+    }
+
+    if (advancedFilters.priority !== "all") {
+      result = result.filter((t) => t.priority === advancedFilters.priority);
+    }
+
+    if (advancedFilters.color !== "all") {
+      result = result.filter((t) => t.color === advancedFilters.color);
+    }
+
+    if (advancedFilters.completed !== "all") {
+      if (advancedFilters.completed === "active") {
+        result = result.filter((t) => !t.completed);
+      } else if (advancedFilters.completed === "completed") {
+        result = result.filter((t) => t.completed);
+      }
+    }
+
+    if (advancedFilters.dateRange.start || advancedFilters.dateRange.end) {
+      result = result.filter((t) => {
+        if (!t.dueDate) return false;
+        const taskDate = t.dueDate;
+        const start = advancedFilters.dateRange.start
+          ? startOfDay(advancedFilters.dateRange.start)
+          : null;
+        const end = advancedFilters.dateRange.end
+          ? endOfDay(advancedFilters.dateRange.end)
+          : null;
+
+        if (start && end) {
+          return isWithinInterval(taskDate, { start, end });
+        } else if (start) {
+          return taskDate >= start;
+        } else if (end) {
+          return taskDate <= end;
+        }
+        return true;
+      });
+    }
+
+    return result;
+  }, [tasks, filter, advancedFilters]);
+
+  const handleTaskSelect = (id: string, selected: boolean) => {
+    setSelectedTasks((prev) => {
+      const next = new Set(prev);
+      if (selected) {
+        next.add(id);
+      } else {
+        next.delete(id);
+      }
+      return next;
+    });
+  };
+
+  const handleBulkComplete = async (ids: string[]) => {
+    for (const id of ids) {
+      const task = tasks.find((t) => t.id === id);
+      if (task && !task.completed) {
+        await toggleTask(id);
+      }
+    }
+    setSelectedTasks(new Set());
+    setBulkMode(false);
+  };
+
+  const handleBulkDelete = async (ids: string[]) => {
+    for (const id of ids) {
+      await deleteTask(id);
+    }
+    setSelectedTasks(new Set());
+    setBulkMode(false);
+  };
+
+  const clearAdvancedFilters = () => {
+    setAdvancedFilters({
+      search: "",
+      priority: "all",
+      color: "all",
+      completed: "all",
+      dateRange: { start: null, end: null },
+    });
+  };
 
   const emptyMessages: Record<FilterType, string> = {
     all: "No tasks yet. Add one to get started!",
@@ -43,73 +146,73 @@ const Index = () => {
   };
 
   return (
-    <div className="min-h-screen flex bg-background">
-      {/* Sidebar */}
-      <aside className="w-64 border-r border-border/50 bg-card p-4 flex flex-col">
-        <div className="flex items-center gap-2 mb-8">
-          <div className="h-9 w-9 rounded-lg bg-primary flex items-center justify-center">
-            <CheckCircle2 className="h-5 w-5 text-primary-foreground" />
-          </div>
-          <span className="font-display font-semibold text-lg text-foreground">Scheduler</span>
-        </div>
-        
-        <nav className="space-y-1">
-          {navigationItems.map((item) => (
-            <NavLink
-              key={item.title}
-              to={item.url}
-              className={({ isActive }) => cn(
-                "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-200",
-                isActive
-                  ? "bg-primary/10 text-primary font-medium"
-                  : "text-muted-foreground hover:text-foreground hover:bg-secondary"
-              )}
-            >
-              <item.icon className="h-5 w-5" />
-              <span>{item.title}</span>
-            </NavLink>
-          ))}
-        </nav>
-      </aside>
+    <div className="app-background min-h-screen">
 
       {/* Main content */}
-      <main className="flex-1 p-8">
+      <div className="p-8">
         <div className="max-w-2xl mx-auto">
           <h2 className="text-2xl font-display font-semibold text-foreground mb-2">Dashboard</h2>
           <p className="text-muted-foreground mb-8">Overview of all your tasks</p>
 
           {/* Stats */}
-          <div className="grid grid-cols-3 gap-4 mb-8">
-            <div className="p-4 rounded-xl bg-card border border-border/50">
-              <p className="text-2xl font-display font-semibold text-foreground">{counts.all}</p>
-              <p className="text-sm text-muted-foreground">Total tasks</p>
-            </div>
-            <div className="p-4 rounded-xl bg-card border border-border/50">
-              <p className="text-2xl font-display font-semibold text-primary">{counts.active}</p>
-              <p className="text-sm text-muted-foreground">In progress</p>
-            </div>
-            <div className="p-4 rounded-xl bg-card border border-border/50">
-              <p className="text-2xl font-display font-semibold text-success">{counts.completed}</p>
-              <p className="text-sm text-muted-foreground">Completed</p>
-            </div>
-          </div>
+          {/* Stats */}
+          <ProductivityStats tasks={tasks} />
 
-          <div className="mb-6">
+          <div className="mb-6 flex items-center justify-between gap-4">
             <FilterTabs activeFilter={filter} onFilterChange={setFilter} counts={counts} />
+            <div className="flex items-center gap-2">
+              <SmartRescheduleButton />
+              <Button
+                variant={bulkMode ? "default" : "outline"}
+                size="sm"
+                onClick={() => {
+                  setBulkMode(!bulkMode);
+                  setSelectedTasks(new Set());
+                }}
+                className="gap-2"
+              >
+                <ListChecks className="h-4 w-4" />
+                {bulkMode ? "Exit Bulk" : "Bulk Select"}
+              </Button>
+            </div>
           </div>
 
           <div className="mb-6">
-            <AddTaskForm onAdd={addTask} />
+            <TaskFilters
+              tasks={tasks}
+              filters={advancedFilters}
+              onFiltersChange={setAdvancedFilters}
+              onClearFilters={clearAdvancedFilters}
+            />
+          </div>
+
+          <div className="mb-6 space-y-3">
+            <AddTaskForm onAdd={addTask} onSaveAsTemplate={createTemplate} />
+            <AITaskForm onAdd={addTask} />
+          </div>
+
+          {/* Templates Section */}
+          <div className="mb-6">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold">Task Templates</h3>
+            </div>
+            <TemplatesList />
           </div>
 
           <TaskList
             tasks={filteredTasks}
             onToggle={toggleTask}
             onDelete={deleteTask}
+            onUpdate={updateTask}
             emptyMessage={emptyMessages[filter]}
+            bulkMode={bulkMode}
+            selectedTasks={selectedTasks}
+            onTaskSelect={handleTaskSelect}
+            onBulkComplete={handleBulkComplete}
+            onBulkDelete={handleBulkDelete}
           />
         </div>
-      </main>
+      </div>
     </div>
   );
 };

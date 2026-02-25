@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 interface CalendarViewProps {
   tasks: Task[];
   onToggle: (id: string) => void;
+  onSelectDate?: (date: Date) => void;
 }
 
 const priorityColors: Record<Priority, string> = {
@@ -16,7 +17,7 @@ const priorityColors: Record<Priority, string> = {
   low: "bg-priority-low",
 };
 
-export function CalendarView({ tasks, onToggle }: CalendarViewProps) {
+export function CalendarView({ tasks, onToggle, onSelectDate }: CalendarViewProps) {
   const [currentDate, setCurrentDate] = useState(new Date());
 
   const monthStart = startOfMonth(currentDate);
@@ -93,13 +94,15 @@ export function CalendarView({ tasks, onToggle }: CalendarViewProps) {
             const isCurrentDay = isToday(day);
 
             return (
-              <div
+              <button
                 key={idx}
                 className={cn(
-                  "min-h-[100px] p-2 border-b border-r border-border/30",
+                  "min-h-[100px] p-2 border-b border-r border-border/30 text-left",
                   !isCurrentMonth && "bg-muted/30",
                   idx % 7 === 6 && "border-r-0"
                 )}
+                onClick={() => onSelectDate?.(day)}
+                type="button"
               >
                 <div
                   className={cn(
@@ -115,7 +118,10 @@ export function CalendarView({ tasks, onToggle }: CalendarViewProps) {
                   {dayTasks.slice(0, 3).map((task) => (
                     <button
                       key={task.id}
-                      onClick={() => onToggle(task.id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onToggle(task.id);
+                      }}
                       className={cn(
                         "w-full text-left px-2 py-1 rounded text-xs truncate transition-all",
                         task.completed
@@ -133,7 +139,7 @@ export function CalendarView({ tasks, onToggle }: CalendarViewProps) {
                     </p>
                   )}
                 </div>
-              </div>
+              </button>
             );
           })}
         </div>
