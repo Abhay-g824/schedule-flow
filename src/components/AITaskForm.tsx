@@ -37,6 +37,7 @@ export function AITaskForm({ onAdd }: AITaskFormProps) {
           setPreview({
             title: first.title,
             date: first.date,
+            time: first.time,
             priority: first.priority,
           });
           setPreviewCount(analysis.tasks.length);

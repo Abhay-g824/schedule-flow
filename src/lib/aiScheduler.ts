@@ -28,6 +28,7 @@ export interface ParsedAITask {
   type: TaskType;
   date?: Date;
   priority: AIPriority;
+  time?: string;
   /**
    * Original text segment that produced this task.
    */
@@ -42,6 +43,7 @@ export interface MultiTaskParseResult {
 // Priority detection rules (keyword-based, overrides any model output)
 
 const HIGH_PRIORITY_KEYWORDS = [
+  "very important",
   "important",
   "critical",
   "urgent",
@@ -56,10 +58,10 @@ const LOW_PRIORITY_KEYWORDS = [
   "not important",
   "low priority",
   "whenever possible",
+  "whenever",
   "later",
   "no rush",
   "optional",
-  "not urgent",
 ];
 
 function applyPriorityRules(
@@ -117,11 +119,14 @@ function createHeuristicModel(): SchedulingModel {
         const parsed = parseNaturalLanguage(trimmed);
         const priority = applyPriorityRules(trimmed, parsed.priority);
 
+        const time = (parsed as any).time as string | undefined;
+
         tasks.push({
           title: parsed.title || trimmed,
           date: parsed.date,
           priority,
           type: inferTaskType(trimmed),
+          time,
           rawSegment: trimmed,
         });
       }
@@ -215,6 +220,107 @@ export function analyzePromptToTasks(prompt: string): MultiTaskParseResult {
       ],
     };
   }
+}
+
+// High-level intent normalization API
+
+export interface TaskIntentResult {
+  intent: "create_task";
+  taskTitle: string;
+  date?: string;
+  priority: Priority;
+  confidence: number;
+}
+
+const FILLER_PATTERNS: RegExp[] = [
+  /\bvery\b/gi,
+  /\bcoming\b/gi,
+  /\bplease\b/gi,
+  /\bschedule\b/gi,
+  /\bset\b/gi,
+  /\bcreate\b/gi,
+  /\badd\b/gi,
+  /\bremind\b/gi,
+  /\btask\b/gi,
+  /\bdo\b/gi,
+  /\bmake\b/gi,
+  /\bplan\b/gi,
+  /\bneed to\b/gi,
+  /\bwe need to\b/gi,
+  /\bkindly\b/gi,
+];
+
+function normalizeTitle(raw: string): string {
+  let text = raw.toLowerCase();
+
+  // Remove filler phrases
+  for (const pattern of FILLER_PATTERNS) {
+    text = text.replace(pattern, " ");
+  }
+
+  // Remove common temporal filler words that might linger in the title
+  text = text.replace(
+    /\b(today|tomorrow|next|this|month|week|later|end of month|beginning of next month)\b/gi,
+    " "
+  );
+
+  text = text.replace(/\s+/g, " ").trim();
+
+  // Domain phrase canonicalization
+  const phraseReplacements: { pattern: RegExp; replacement: string }[] = [
+    { pattern: /\bgen ai class\b/gi, replacement: "GEN AI CLASS" },
+    { pattern: /\b(team|project)\s+meeting\b/gi, replacement: "PROJECT MEETING" },
+    { pattern: /\bmeeting with team\b/gi, replacement: "TEAM MEETING" },
+    { pattern: /\bproject review\b/gi, replacement: "PROJECT REVIEW" },
+    { pattern: /\bdoctor (appointment|visit)\b/gi, replacement: "DOCTOR APPOINTMENT" },
+    { pattern: /\bsubmit assignment\b/gi, replacement: "ASSIGNMENT SUBMISSION" },
+    { pattern: /\bassignment submission\b/gi, replacement: "ASSIGNMENT SUBMISSION" },
+    { pattern: /\bprepare for exam\b/gi, replacement: "EXAM PREPARATION" },
+    { pattern: /\bexam preparation\b/gi, replacement: "EXAM PREPARATION" },
+  ];
+
+  for (const { pattern, replacement } of phraseReplacements) {
+    if (pattern.test(text)) {
+      return replacement;
+    }
+  }
+
+  // Generic fallback: keep multi-word entities intact but uppercase and trim
+  if (!text) {
+    return raw.trim().toUpperCase();
+  }
+
+  return text.toUpperCase();
+}
+
+export function parsePromptToIntent(prompt: string): TaskIntentResult {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return {
+      intent: "create_task",
+      taskTitle: "",
+      date: undefined,
+      priority: "medium",
+      confidence: 0,
+    };
+  }
+
+  const parsed = parseNaturalLanguage(trimmed);
+  const priority = applyPriorityRules(trimmed, parsed.priority as Priority | undefined);
+  const taskTitle = normalizeTitle(parsed.title || trimmed);
+
+  let confidence = 0.8;
+  if (!parsed.date) {
+    confidence = 0.6;
+  }
+
+  return {
+    intent: "create_task",
+    taskTitle,
+    date: parsed.date ? parsed.date.toISOString() : undefined,
+    priority,
+    confidence,
+  };
 }
 
 // Smart rescheduling with user preferences

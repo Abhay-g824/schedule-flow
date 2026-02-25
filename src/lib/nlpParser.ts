@@ -52,6 +52,16 @@ export function parseNaturalLanguage(input: string): ParsedTask {
   }
 
   // Extract date patterns - check in order of specificity
+  // 1) Ordinal weekday patterns (e.g., "first monday of next month")
+  const ordinalDate = parseOrdinalWeekdayDate(normalized, today);
+  if (ordinalDate) {
+    date = ordinalDate.date;
+    const datePattern = new RegExp(
+      ordinalDate.matchStr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      "gi"
+    );
+    title = title.replace(datePattern, "").trim();
+  } else {
   // First check for absolute dates (e.g., "12 dec", "12 december", "dec 12", "on 12 dec")
   const absoluteDate = parseAbsoluteDate(normalized, today);
   if (absoluteDate) {
@@ -99,6 +109,7 @@ export function parseNaturalLanguage(input: string): ParsedTask {
         }
       }
     }
+  }
   }
 
   // If date was found and time is set, apply time to the date
@@ -292,5 +303,122 @@ function parseAbsoluteDate(normalized: string, today: Date): { date: Date; match
   }
 
   return null;
+}
+
+function parseOrdinalWeekdayDate(
+  normalized: string,
+  today: Date
+): { date: Date; matchStr: string } | null {
+  const ordinalMap: Record<string, number | "last"> = {
+    first: 1,
+    "1st": 1,
+    second: 2,
+    "2nd": 2,
+    third: 3,
+    "3rd": 3,
+    fourth: 4,
+    "4th": 4,
+    last: "last",
+  };
+
+  const dayMap: Record<string, number> = {
+    sunday: 0,
+    sun: 0,
+    monday: 1,
+    mon: 1,
+    tuesday: 2,
+    tue: 2,
+    wednesday: 3,
+    wed: 3,
+    thursday: 4,
+    thu: 4,
+    friday: 5,
+    fri: 5,
+    saturday: 6,
+    sat: 6,
+  };
+
+  const patterns: RegExp[] = [
+    // "first monday of next month", "3rd sat in this month"
+    /\b(first|1st|second|2nd|third|3rd|fourth|4th|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\s+(?:of|in)\s+(this|next)\s+month\b/,
+    // "next month first monday"
+    /\b(next|this)\s+month\s+(first|1st|second|2nd|third|3rd|fourth|4th|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\b/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = normalized.match(pattern);
+    if (!match) continue;
+
+    const matchStr = match[0];
+    let ordinalStr: string;
+    let weekdayStr: string;
+    let monthHint: "this" | "next";
+
+    if (pattern === patterns[0]) {
+      // ordinal weekday of/in this|next month
+      const m = pattern.exec(normalized);
+      if (!m) continue;
+      ordinalStr = m[1].toLowerCase();
+      weekdayStr = m[2].toLowerCase();
+      monthHint = m[3].toLowerCase() as "this" | "next";
+    } else {
+      // this|next month ordinal weekday
+      const m = pattern.exec(normalized);
+      if (!m) continue;
+      monthHint = m[1].toLowerCase() as "this" | "next";
+      ordinalStr = m[2].toLowerCase();
+      weekdayStr = m[3].toLowerCase();
+    }
+
+    const ordinal = ordinalMap[ordinalStr];
+    const weekday = dayMap[weekdayStr];
+    if (!ordinal || weekday === undefined) continue;
+
+    const baseYear = today.getFullYear();
+    const baseMonth =
+      monthHint === "next" ? today.getMonth() + 1 : today.getMonth();
+
+    const target = computeNthWeekdayOfMonth(
+      baseYear,
+      baseMonth,
+      weekday,
+      ordinal
+    );
+    if (!target) continue;
+
+    return { date: target, matchStr };
+  }
+
+  return null;
+}
+
+function computeNthWeekdayOfMonth(
+  year: number,
+  month: number,
+  weekday: number,
+  ordinal: number | "last"
+): Date | null {
+  if (month > 11) {
+    year += Math.floor(month / 12);
+    month = month % 12;
+  }
+
+  if (ordinal === "last") {
+    const lastDay = new Date(year, month + 1, 0);
+    const lastWeekday = lastDay.getDay();
+    const diff = (lastWeekday - weekday + 7) % 7;
+    const date = lastDay.getDate() - diff;
+    return new Date(year, month, date);
+  }
+
+  const firstDay = new Date(year, month, 1);
+  const firstWeekday = firstDay.getDay();
+  const offset = (weekday - firstWeekday + 7) % 7;
+  const date = 1 + offset + (ordinal - 1) * 7;
+
+  if (date < 1 || date > 31) return null;
+  const result = new Date(year, month, date);
+  if (result.getMonth() !== month) return null;
+  return result;
 }
 
