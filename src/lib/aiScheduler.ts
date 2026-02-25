@@ -245,6 +245,7 @@ const FILLER_PATTERNS: RegExp[] = [
   /\bdo\b/gi,
   /\bmake\b/gi,
   /\bplan\b/gi,
+  /\bassign\b/gi,
   /\bneed to\b/gi,
   /\bwe need to\b/gi,
   /\bkindly\b/gi,
@@ -277,6 +278,8 @@ function normalizeTitle(raw: string): string {
     { pattern: /\bassignment submission\b/gi, replacement: "ASSIGNMENT SUBMISSION" },
     { pattern: /\bprepare for exam\b/gi, replacement: "EXAM PREPARATION" },
     { pattern: /\bexam preparation\b/gi, replacement: "EXAM PREPARATION" },
+    { pattern: /\bclient call\b/gi, replacement: "CLIENT CALL" },
+    { pattern: /\bcode review\b/gi, replacement: "CODE REVIEW" },
   ];
 
   for (const { pattern, replacement } of phraseReplacements) {

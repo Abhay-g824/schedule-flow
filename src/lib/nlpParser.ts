@@ -14,7 +14,7 @@ interface ParsedTask {
 }
 
 export function parseNaturalLanguage(input: string): ParsedTask {
-  const normalized = input.toLowerCase().trim();
+  const normalized = normalizeForDateParsing(input);
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   
@@ -188,15 +188,44 @@ function parseTime(timeStr: string): string {
   return '';
 }
 
+function normalizeForDateParsing(input: string): string {
+  let text = input.toLowerCase().trim();
+
+  // Normalize weekday abbreviations
+  text = text
+    .replace(/\bmon\b/g, 'monday')
+    .replace(/\btue\b/g, 'tuesday')
+    .replace(/\btues\b/g, 'tuesday')
+    .replace(/\bwed\b/g, 'wednesday')
+    .replace(/\bthu\b/g, 'thursday')
+    .replace(/\bthur\b/g, 'thursday')
+    .replace(/\bthurs\b/g, 'thursday')
+    .replace(/\bfri\b/g, 'friday')
+    .replace(/\bsat\b/g, 'saturday')
+    .replace(/\bsun\b/g, 'sunday');
+
+  // Normalize ordinal abbreviations
+  text = text
+    .replace(/\b1st\b/g, 'first')
+    .replace(/\b2nd\b/g, 'second')
+    .replace(/\b3rd\b/g, 'third')
+    .replace(/\b4th\b/g, 'fourth');
+
+  // Collapse extra spaces
+  text = text.replace(/\s+/g, ' ').trim();
+
+  return text;
+}
+
 function getDayOffset(dayStr: string, fullText: string): number {
   const dayMap: Record<string, number> = {
-    'sunday': 0,
-    'monday': 1,
-    'tuesday': 2,
-    'wednesday': 3,
-    'thursday': 4,
-    'friday': 5,
-    'saturday': 6,
+    'sunday': 0, 'sun': 0,
+    'monday': 1, 'mon': 1,
+    'tuesday': 2, 'tue': 2, 'tues': 2,
+    'wednesday': 3, 'wed': 3,
+    'thursday': 4, 'thu': 4, 'thur': 4, 'thurs': 4,
+    'friday': 5, 'fri': 5,
+    'saturday': 6, 'sat': 6,
   };
   
   const targetDay = dayMap[dayStr.toLowerCase()];
@@ -311,38 +340,44 @@ function parseOrdinalWeekdayDate(
 ): { date: Date; matchStr: string } | null {
   const ordinalMap: Record<string, number | "last"> = {
     first: 1,
-    "1st": 1,
     second: 2,
-    "2nd": 2,
     third: 3,
-    "3rd": 3,
     fourth: 4,
-    "4th": 4,
     last: "last",
   };
 
   const dayMap: Record<string, number> = {
     sunday: 0,
-    sun: 0,
     monday: 1,
-    mon: 1,
     tuesday: 2,
-    tue: 2,
     wednesday: 3,
-    wed: 3,
     thursday: 4,
-    thu: 4,
     friday: 5,
-    fri: 5,
     saturday: 6,
-    sat: 6,
+  };
+
+  const monthMap: Record<string, number> = {
+    january: 0, jan: 0,
+    february: 1, feb: 1,
+    march: 2, mar: 2,
+    april: 3, apr: 3,
+    may: 4,
+    june: 5, jun: 5,
+    july: 6, jul: 6,
+    august: 7, aug: 7,
+    september: 8, sep: 8, sept: 8,
+    october: 9, oct: 9,
+    november: 10, nov: 10,
+    december: 11, dec: 11,
   };
 
   const patterns: RegExp[] = [
     // "first monday of next month", "3rd sat in this month"
-    /\b(first|1st|second|2nd|third|3rd|fourth|4th|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\s+(?:of|in)\s+(this|next)\s+month\b/,
+    /\b(first|second|third|fourth|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(?:of|in)\s+(this|next)\s+month\b/,
     // "next month first monday"
-    /\b(next|this)\s+month\s+(first|1st|second|2nd|third|3rd|fourth|4th|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|wed|thu|fri|sat|sun)\b/,
+    /\b(next|this)\s+month\s+(first|second|third|fourth|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/,
+    // "second tuesday next month"
+    /\b(first|second|third|fourth|last)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+(this|next)\s+month\b/,
   ];
 
   for (const pattern of patterns) {
@@ -361,13 +396,20 @@ function parseOrdinalWeekdayDate(
       ordinalStr = m[1].toLowerCase();
       weekdayStr = m[2].toLowerCase();
       monthHint = m[3].toLowerCase() as "this" | "next";
-    } else {
+    } else if (pattern === patterns[1]) {
       // this|next month ordinal weekday
       const m = pattern.exec(normalized);
       if (!m) continue;
       monthHint = m[1].toLowerCase() as "this" | "next";
       ordinalStr = m[2].toLowerCase();
       weekdayStr = m[3].toLowerCase();
+    } else {
+      // ordinal weekday this|next month (e.g., "second tuesday next month")
+      const m = pattern.exec(normalized);
+      if (!m) continue;
+      ordinalStr = m[1].toLowerCase();
+      weekdayStr = m[2].toLowerCase();
+      monthHint = m[3].toLowerCase() as "this" | "next";
     }
 
     const ordinal = ordinalMap[ordinalStr];
