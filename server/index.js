@@ -466,13 +466,13 @@ app.post("/ai/schedule/parse", authMiddleware, async (req, res) => {
     }
 
     console.error("LLM scheduling parse failed after retries:", lastError);
-    return res.status(200).json({
+    return res.status(422).json({
       ok: false,
       message: "LLM output could not be parsed as valid scheduling JSON",
     });
   } catch (err) {
     console.error("LLM scheduling endpoint error:", err);
-    return res.status(200).json({
+    return res.status(500).json({
       ok: false,
       message: "LLM scheduling endpoint error",
     });

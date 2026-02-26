@@ -3,7 +3,9 @@ import {
   SchedulingLLMResult,
   SchedulingTask,
 } from "@/lib/llmSchedulingTypes";
-import { resolveLLMResultToSchedules } from "@/lib/deterministicDateResolver";
+import {
+  resolveLLMResultToSchedules,
+} from "@/lib/deterministicDateResolver";
 import { analyzePromptToTasks } from "@/lib/aiScheduler";
 import { Priority } from "@/types/task";
 
@@ -78,10 +80,13 @@ export async function handleUserMessage(
     for (const s of schedules) {
       // Only create new events for create_task / schedule_only here.
       if (s.intent === "create_task" || s.intent === "schedule_only") {
+        const timing = buildEventTiming(s);
         await adapter.createEvent({
           taskTitle: s.taskTitle,
           priority: s.priority as Priority,
-          dueDate: s.dueDate,
+          dueDate: timing.dueDate,
+          timeSlotStart: timing.timeSlotStart,
+          timeSlotEnd: timing.timeSlotEnd,
         });
       }
     }
@@ -149,10 +154,13 @@ export async function handleUserMessage(
 
     for (const s of schedules) {
       if (s.intent === "create_task" || s.intent === "schedule_only") {
+        const timing = buildEventTiming(s);
         await adapter.createEvent({
           taskTitle: s.taskTitle,
           priority: s.priority as Priority,
-          dueDate: s.dueDate,
+          dueDate: timing.dueDate,
+          timeSlotStart: timing.timeSlotStart,
+          timeSlotEnd: timing.timeSlotEnd,
         });
       }
       // For reschedule / multi_schedule, the adapter interface allows
@@ -216,10 +224,21 @@ async function fallbackToHeuristicScheduler(
   const adapter = new CustomCalendarAdapter(options.token);
 
   for (const t of analysis.tasks) {
+    const dueDate = t.date;
+    let timeSlotStart: Date | undefined;
+    let timeSlotEnd: Date | undefined;
+
+    if (dueDate && (dueDate.getHours() !== 0 || dueDate.getMinutes() !== 0)) {
+      timeSlotStart = new Date(dueDate.getTime());
+      timeSlotEnd = new Date(timeSlotStart.getTime() + 60 * 60 * 1000);
+    }
+
     await adapter.createEvent({
       taskTitle: t.title,
       priority: t.priority as Priority,
-      dueDate: t.date,
+      dueDate,
+      timeSlotStart,
+      timeSlotEnd,
     });
   }
 
@@ -237,6 +256,47 @@ async function fallbackToHeuristicScheduler(
     state: nextState,
     assistantReply: reply,
   };
+}
+
+// Convert a resolved scheduled task into concrete timing suitable
+// for the calendar adapter. If a time is present (either as a parsed
+// time string or encoded in the dueDate), we populate both
+// timeSlotStart and timeSlotEnd so time-aware UI and logic work.
+function buildEventTiming(s: {
+  dueDate?: Date;
+  time?: string | null;
+}): {
+  dueDate?: Date;
+  timeSlotStart?: Date;
+  timeSlotEnd?: Date;
+} {
+  const dueDate = s.dueDate ? new Date(s.dueDate.getTime()) : undefined;
+
+  if (!dueDate) {
+    return { dueDate };
+  }
+
+  let hasExplicitTime = false;
+
+  if (s.time && s.time.includes(":")) {
+    const [h, m] = s.time.split(":").map((n) => Number(n));
+    if (!Number.isNaN(h) && !Number.isNaN(m)) {
+      dueDate.setHours(h, m, 0, 0);
+      hasExplicitTime = true;
+    }
+  }
+
+  if (!hasExplicitTime) {
+    if (dueDate.getHours() === 0 && dueDate.getMinutes() === 0) {
+      // No meaningful time information – leave as all-day without slot.
+      return { dueDate };
+    }
+  }
+
+  const timeSlotStart = new Date(dueDate.getTime());
+  const timeSlotEnd = new Date(timeSlotStart.getTime() + 60 * 60 * 1000);
+
+  return { dueDate, timeSlotStart, timeSlotEnd };
 }
 
 function buildConfirmationMessage(result: SchedulingLLMResult): string {
