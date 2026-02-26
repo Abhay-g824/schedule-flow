@@ -256,9 +256,11 @@ Return ONLY the JSON object described above, nothing else.`,
     model: DEFAULT_MODEL,
     messages,
     stream: false,
+    format: "json",
     options: {
       temperature: 0,
-      top_p: 0.1,
+      top_p: 0.9,
+      num_predict: 150
     },
   });
 
