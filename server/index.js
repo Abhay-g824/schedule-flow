@@ -6,6 +6,7 @@ import jwt from "jsonwebtoken";
 import { randomUUID } from "crypto";
 import path from "path";
 import fs from "fs";
+import { callSchedulingModel } from "./ollamaClient.js";
 
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
@@ -427,6 +428,150 @@ app.patch("/user/onboarding", authMiddleware, async (req, res) => {
     res.status(500).json({ message: "Internal error" });
   }
 });
+
+// --------- AI scheduling endpoint (LLM JSON-only parser) ---------
+
+/**
+ * POST /ai/schedule/parse
+ * Body: { prompt: string, context?: Array<{ role: "user" | "assistant", content: string }> }
+ *
+ * Responsibilities:
+ * - Call local Ollama model via ollamaClient.
+ * - Enforce STRICT JSON output with a small retry loop.
+ * - Never perform date math here – only return structured fields.
+ * - If the model fails, return { ok: false } so the frontend can
+ *   fall back to the deterministic rule-based parser.
+ */
+app.post("/ai/schedule/parse", authMiddleware, async (req, res) => {
+  const { prompt, context } = req.body || {};
+
+  if (!prompt || typeof prompt !== "string") {
+    return res.status(400).json({ ok: false, message: "prompt is required" });
+  }
+
+  try {
+    const maxAttempts = 3;
+    let lastError = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const raw = await callSchedulingModel(prompt, context);
+      const parsed = tryParseSchedulingJson(raw);
+      if (parsed.ok) {
+        return res.json({
+          ok: true,
+          data: parsed.data,
+        });
+      }
+      lastError = parsed.error;
+    }
+
+    console.error("LLM scheduling parse failed after retries:", lastError);
+    return res.status(200).json({
+      ok: false,
+      message: "LLM output could not be parsed as valid scheduling JSON",
+    });
+  } catch (err) {
+    console.error("LLM scheduling endpoint error:", err);
+    return res.status(200).json({
+      ok: false,
+      message: "LLM scheduling endpoint error",
+    });
+  }
+});
+
+function tryParseSchedulingJson(raw) {
+  if (!raw || typeof raw !== "string") {
+    return { ok: false, error: "Empty LLM output" };
+  }
+
+  // Best-effort: trim and try to isolate a JSON object.
+  const trimmed = raw.trim();
+  let candidate = trimmed;
+
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    candidate = trimmed.slice(firstBrace, lastBrace + 1);
+  }
+
+  try {
+    const json = JSON.parse(candidate);
+    const validated = validateSchedulingShape(json);
+    if (!validated.ok) {
+      return { ok: false, error: validated.error || "Invalid shape" };
+    }
+    return { ok: true, data: json };
+  } catch (err) {
+    return { ok: false, error: err.message || "JSON parse error" };
+  }
+}
+
+function validateSchedulingShape(obj) {
+  if (typeof obj !== "object" || obj === null) {
+    return { ok: false, error: "Root must be an object" };
+  }
+
+  const intents = ["create_task", "schedule_only", "reschedule", "multi_schedule"];
+  if (!intents.includes(obj.intent)) {
+    return { ok: false, error: "Invalid or missing intent" };
+  }
+
+  if (!Array.isArray(obj.tasks)) {
+    return { ok: false, error: "tasks must be an array" };
+  }
+
+  for (const task of obj.tasks) {
+    if (typeof task !== "object" || task === null) {
+      return { ok: false, error: "task must be object" };
+    }
+    if (typeof task.taskTitle !== "string" || !task.taskTitle.trim()) {
+      return { ok: false, error: "taskTitle must be non-empty string" };
+    }
+
+    const priorities = ["high", "medium", "low"];
+    if (!priorities.includes(task.priority)) {
+      return { ok: false, error: "priority must be high|medium|low" };
+    }
+
+    if (
+      task.dateExpression !== null &&
+      typeof task.dateExpression !== "string"
+    ) {
+      return { ok: false, error: "dateExpression must be string|null" };
+    }
+
+    if (task.month !== null && typeof task.month !== "number") {
+      return { ok: false, error: "month must be number|null" };
+    }
+
+    if (
+      task.weekday !== null &&
+      typeof task.weekday !== "string"
+    ) {
+      return { ok: false, error: "weekday must be string|null" };
+    }
+
+    if (
+      task.weekdayOrdinal !== null &&
+      typeof task.weekdayOrdinal !== "number"
+    ) {
+      return { ok: false, error: "weekdayOrdinal must be number|null" };
+    }
+
+    if (task.time !== null && typeof task.time !== "string") {
+      return { ok: false, error: "time must be string|null" };
+    }
+  }
+
+  if (typeof obj.requiresTimeConfirmation !== "boolean") {
+    return { ok: false, error: "requiresTimeConfirmation must be boolean" };
+  }
+  if (typeof obj.requiresClarification !== "boolean") {
+    return { ok: false, error: "requiresClarification must be boolean" };
+  }
+
+  return { ok: true };
+}
 
 // Template endpoints
 app.get("/templates", authMiddleware, async (req, res) => {

@@ -4,6 +4,7 @@ import { useTasks } from "@/hooks/useTasks";
 import { useTemplates } from "@/hooks/useTemplates";
 import { AddTaskForm } from "@/components/AddTaskForm";
 import { AITaskForm } from "@/components/AITaskForm";
+import { AIChatScheduler } from "@/components/AIChatScheduler";
 import { TemplatesList } from "@/components/TemplatesList";
 import { SmartRescheduleButton } from "@/components/SmartRescheduleButton";
 import { ProductivityStats } from "@/components/ProductivityStats";
@@ -189,6 +190,7 @@ const Index = () => {
           <div className="mb-6 space-y-3">
             <AddTaskForm onAdd={addTask} onSaveAsTemplate={createTemplate} />
             <AITaskForm onAdd={addTask} />
+            <AIChatScheduler />
           </div>
 
           {/* Templates Section */}
