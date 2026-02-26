@@ -1,11 +1,12 @@
 import ollama from "ollama";
 
-const DEFAULT_MODEL = process.env.OLLAMA_SCHEDULER_MODEL || "qwen:1.8b";
+// Default to gemma:2b as the local conversational model,
+// but allow overriding via env if needed.
+const DEFAULT_MODEL = process.env.OLLAMA_SCHEDULER_MODEL || "gemma:2b";
 
 /**
- * Call the local Ollama model for conversational scheduling.
- * This function NEVER performs date math – it only asks the model
- * to extract structured information and return strict JSON.
+ * Legacy structured scheduling parser used by /ai/schedule/parse.
+ * Kept for backwards compatibility with the deterministic pipeline.
  */
 export async function callSchedulingModel(prompt, context = null) {
   const messages = [];
@@ -83,3 +84,89 @@ function buildSchedulingPrompt(userInput) {
   );
 }
 
+/**
+ * Conversational + structured assistant used by /ai/schedule.
+ *
+ * It behaves like a lightweight ChatGPT-style assistant while always
+ * returning STRICT JSON in the following schema:
+ *
+ * {
+ *   "assistant_message": "Conversational reply shown to user",
+ *   "action": {
+ *       "type": "create_task" | "clarify" | "none",
+ *       "payload": {
+ *           "title": "STRING",
+ *           "start": "ISO_DATE_STRING",
+ *           "end": "ISO_DATE_STRING",
+ *           "priority": "low" | "medium" | "high"
+ *       }
+ *   }
+ * }
+ */
+export async function callConversationalSchedulingModel(
+  message,
+  contextTurns = []
+) {
+  const messages = [];
+
+  messages.push({
+    role: "system",
+    content:
+      "You are a lightweight ChatGPT-style assistant helping a user manage their schedule. " +
+      "You must ALWAYS reply with VALID JSON ONLY, no markdown, no extra text. " +
+      "Behave conversationally but also decide whether to create a task, ask for clarification, or do nothing.\n\n" +
+      "RESPONSE FORMAT (MANDATORY):\n" +
+      '{\n' +
+      '  "assistant_message": "Conversational reply shown to user",\n' +
+      '  "action": {\n' +
+      '    "type": "create_task" | "clarify" | "none",\n' +
+      '    "payload": {\n' +
+      '      "title": "STRING",\n' +
+      '      "start": "ISO_DATE_STRING",\n' +
+      '      "end": "ISO_DATE_STRING",\n' +
+      '      "priority": "low" | "medium" | "high"\n' +
+      "    }\n" +
+      "  }\n" +
+      "}\n\n" +
+      "RULES:\n" +
+      "- assistant_message: always conversational and human-like.\n" +
+      '- action.type:\n' +
+      '  - "create_task" when scheduling is clear (date & time understood).\n' +
+      '  - "clarify" when you need more details (e.g. missing date/time).\n' +
+      '  - "none" when the user is just chatting.\n' +
+      "- If action.type is \"clarify\", assistant_message MUST ask a follow-up question and action.payload can be an empty object.\n" +
+      "- If action.type is \"none\", you are just chatting and action.payload can be an empty object.\n" +
+      "- When creating a task, fill payload.title, payload.start, payload.end, payload.priority.\n" +
+      "- Use ISO 8601 strings for start/end (e.g. 2026-02-26T17:00:00.000Z).\n" +
+      "- Never include explanations or any text outside the JSON.",
+  });
+
+  // Short conversational history (previous 3–5 turns).
+  if (Array.isArray(contextTurns) && contextTurns.length > 0) {
+    for (const turn of contextTurns) {
+      if (turn.role === "user" || turn.role === "assistant") {
+        messages.push({
+          role: turn.role,
+          content: String(turn.content ?? ""),
+        });
+      }
+    }
+  }
+
+  messages.push({
+    role: "user",
+    content: String(message ?? ""),
+  });
+
+  const response = await ollama.chat({
+    model: DEFAULT_MODEL,
+    messages,
+    stream: false,
+    options: {
+      temperature: 0.3,
+    },
+  });
+
+  const content = response?.message?.content ?? "";
+  return content;
+}

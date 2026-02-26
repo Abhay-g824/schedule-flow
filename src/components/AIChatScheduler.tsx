@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
+import { useTasks } from "@/hooks/useTasks";
 import {
   ConversationState,
   handleUserMessage,
@@ -10,6 +11,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 
 export function AIChatScheduler() {
   const { token } = useAuth();
+  const { fetchTasks } = useTasks();
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [state, setState] = useState<ConversationState>({ history: [] });
@@ -24,6 +26,9 @@ export function AIChatScheduler() {
     try {
       const result = await handleUserMessage(input, state, { token });
       setState(result.state);
+      if (result.taskCreated) {
+        await fetchTasks();
+      }
       setInput("");
     } catch (err) {
       console.error("AIChatScheduler handleSend error", err);

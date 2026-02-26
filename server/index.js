@@ -6,7 +6,10 @@ import jwt from "jsonwebtoken";
 import { randomUUID } from "crypto";
 import path from "path";
 import fs from "fs";
-import { callSchedulingModel } from "./ollamaClient.js";
+import {
+  callSchedulingModel,
+  callConversationalSchedulingModel,
+} from "./ollamaClient.js";
 
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
@@ -18,6 +21,10 @@ if (!fs.existsSync(DB_PATH)) {
 }
 
 const db = new sqlite3.Database(DB_PATH);
+
+// In-memory, per-user conversational history for the AI assistant.
+// Map<userId, Array<{ role: "user" | "assistant", content: string }>>
+const aiConversationHistory = new Map();
 
 db.serialize(() => {
   db.run(`
@@ -568,6 +575,220 @@ function validateSchedulingShape(obj) {
   }
   if (typeof obj.requiresClarification !== "boolean") {
     return { ok: false, error: "requiresClarification must be boolean" };
+  }
+
+  return { ok: true };
+}
+// --------- Conversational AI scheduling assistant ---------
+
+/**
+ * POST /ai/schedule
+ * Body: { message: string }
+ *
+ * Responsibilities:
+ * - Maintain short in-memory conversation history per user session.
+ * - Call local Ollama (gemma:2b) to get STRICT JSON with:
+ *     {
+ *       "assistant_message": string,
+ *       "action": {
+ *         "type": "create_task" | "clarify" | "none",
+ *         "payload": { ... }
+ *       }
+ *     }
+ * - Safely parse and validate the JSON.
+ * - When action.type === "create_task", create a real task using the
+ *   existing tasks table schema.
+ * - Only confirm scheduling to the user after successful creation.
+ */
+app.post("/ai/schedule", authMiddleware, async (req, res) => {
+  const { message } = req.body || {};
+
+  if (!message || typeof message !== "string") {
+    return res.status(400).json({
+      success: false,
+      error: "message is required",
+    });
+  }
+
+  const userId = req.userId;
+
+  // Get the existing history for this user and take the last 5 turns.
+  const existingHistory = aiConversationHistory.get(userId) || [];
+  const shortHistory =
+    existingHistory.length > 5
+      ? existingHistory.slice(existingHistory.length - 5)
+      : existingHistory;
+
+  // Append the new user message to the working history we send to the model.
+  const contextForModel = [
+    ...shortHistory,
+    { role: "user", content: message.trim() },
+  ];
+
+  let raw;
+  try {
+    raw = await callConversationalSchedulingModel(message, contextForModel);
+  } catch (err) {
+    console.error("Ollama conversational scheduling error:", err);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to contact AI assistant",
+    });
+  }
+
+  let parsed;
+  try {
+    // The model is instructed to return pure JSON only.
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    console.error("Failed to parse AI JSON:", err, "raw:", raw);
+    return res.status(500).json({
+      success: false,
+      error: "AI returned invalid JSON",
+    });
+  }
+
+  const validation = validateConversationalAiShape(parsed);
+  if (!validation.ok) {
+    console.error("AI JSON failed shape validation:", validation.error);
+    return res.status(500).json({
+      success: false,
+      error: "AI returned JSON in unexpected format",
+    });
+  }
+
+  const assistantMessage = parsed.assistant_message;
+  const action = parsed.action || { type: "none", payload: {} };
+
+  // Update in-memory history only after we have a valid assistant message.
+  const updatedHistory = [
+    ...existingHistory,
+    { role: "user", content: message.trim() },
+    { role: "assistant", content: assistantMessage },
+  ];
+  // Keep history short (e.g., last 10 turns).
+  const trimmedHistory =
+    updatedHistory.length > 10
+      ? updatedHistory.slice(updatedHistory.length - 10)
+      : updatedHistory;
+  aiConversationHistory.set(userId, trimmedHistory);
+
+  if (action.type === "create_task") {
+    try {
+      const payload = action.payload || {};
+      const { title, start, end, priority } = payload;
+
+      if (
+        !title ||
+        typeof title !== "string" ||
+        !start ||
+        typeof start !== "string" ||
+        !end ||
+        typeof end !== "string" ||
+        !["low", "medium", "high"].includes(priority)
+      ) {
+        return res.status(400).json({
+          success: false,
+          error: "AI create_task payload is missing required fields",
+        });
+      }
+
+      const id = randomUUID();
+      const createdAt = new Date().toISOString();
+      const dueDate = start; // Use task start as due_date for compatibility.
+      const timeSlotStart = start;
+      const timeSlotEnd = end;
+
+      await runQuery(
+        "INSERT INTO tasks (id, user_id, title, description, priority, completed, due_date, created_at, color, reminder_time, time_slot_start, time_slot_end, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+          id,
+          userId,
+          title,
+          null,
+          priority,
+          0,
+          dueDate,
+          createdAt,
+          null,
+          null,
+          timeSlotStart,
+          timeSlotEnd,
+          null,
+        ]
+      );
+
+      // Only confirm after the insert succeeds.
+      return res.json({
+        success: true,
+        message: assistantMessage,
+      });
+    } catch (err) {
+      console.error("Create task via /ai/schedule error:", err);
+      return res.status(500).json({
+        success: false,
+        error: "Failed to create task from AI instruction",
+      });
+    }
+  }
+
+  if (action.type === "clarify") {
+    return res.json({
+      success: false,
+      clarification: assistantMessage,
+    });
+  }
+
+  // action.type === "none" – pure conversational reply.
+  return res.json({
+    success: false,
+    message: assistantMessage,
+  });
+});
+
+function validateConversationalAiShape(obj) {
+  if (typeof obj !== "object" || obj === null) {
+    return { ok: false, error: "Root must be an object" };
+  }
+
+  if (typeof obj.assistant_message !== "string") {
+    return { ok: false, error: "assistant_message must be a string" };
+  }
+
+  if (typeof obj.action !== "object" || obj.action === null) {
+    return { ok: false, error: "action must be an object" };
+  }
+
+  const type = obj.action.type;
+  if (!["create_task", "clarify", "none"].includes(type)) {
+    return { ok: false, error: "action.type must be create_task|clarify|none" };
+  }
+
+  // Payload is only required for create_task; for others it can be empty.
+  if (type === "create_task") {
+    const payload = obj.action.payload;
+    if (typeof payload !== "object" || payload === null) {
+      return {
+        ok: false,
+        error: "action.payload must be an object for create_task",
+      };
+    }
+
+    if (typeof payload.title !== "string" || !payload.title.trim()) {
+      return { ok: false, error: "payload.title must be a non-empty string" };
+    }
+    if (typeof payload.start !== "string" || !payload.start.trim()) {
+      return { ok: false, error: "payload.start must be an ISO date string" };
+    }
+    if (typeof payload.end !== "string" || !payload.end.trim()) {
+      return { ok: false, error: "payload.end must be an ISO date string" };
+    }
+    if (!["low", "medium", "high"].includes(payload.priority)) {
+      return {
+        ok: false,
+        error: "payload.priority must be low|medium|high",
+      };
+    }
   }
 
   return { ok: true };
