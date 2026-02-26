@@ -638,10 +638,20 @@ app.post("/ai/schedule", authMiddleware, async (req, res) => {
 
   let parsed;
   try {
-    // The model is instructed to return pure JSON only.
-    parsed = JSON.parse(raw);
+    // Safely extract the first JSON object from the LLM response before parsing.
+    const rawString = String(raw ?? "").trim();
+
+    // Extract first JSON object from response
+    const jsonMatch = rawString.match(/\{[\s\S]*\}/);
+
+    if (!jsonMatch) {
+      console.error("No JSON found in LLM response:", rawString);
+      throw new Error("Invalid LLM response format");
+    }
+
+    parsed = JSON.parse(jsonMatch[0]);
   } catch (err) {
-    console.error("Failed to parse AI JSON:", err, "raw:", raw);
+    console.error("JSON parse error:", err, "RAW:", raw);
     return res.status(500).json({
       success: false,
       error: "AI returned invalid JSON",

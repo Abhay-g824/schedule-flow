@@ -38,6 +38,10 @@ export async function callSchedulingModel(prompt, context = null) {
     model: DEFAULT_MODEL,
     messages,
     stream: false,
+    options: {
+      temperature: 0,
+      top_p: 0.1,
+    },
   });
 
   const content = response?.message?.content ?? "";
@@ -111,34 +115,42 @@ export async function callConversationalSchedulingModel(
 
   messages.push({
     role: "system",
-    content:
-      "You are a lightweight ChatGPT-style assistant helping a user manage their schedule. " +
-      "You must ALWAYS reply with VALID JSON ONLY, no markdown, no extra text. " +
-      "Behave conversationally but also decide whether to create a task, ask for clarification, or do nothing.\n\n" +
-      "RESPONSE FORMAT (MANDATORY):\n" +
-      '{\n' +
-      '  "assistant_message": "Conversational reply shown to user",\n' +
-      '  "action": {\n' +
-      '    "type": "create_task" | "clarify" | "none",\n' +
-      '    "payload": {\n' +
-      '      "title": "STRING",\n' +
-      '      "start": "ISO_DATE_STRING",\n' +
-      '      "end": "ISO_DATE_STRING",\n' +
-      '      "priority": "low" | "medium" | "high"\n' +
-      "    }\n" +
-      "  }\n" +
-      "}\n\n" +
-      "RULES:\n" +
-      "- assistant_message: always conversational and human-like.\n" +
-      '- action.type:\n' +
-      '  - "create_task" when scheduling is clear (date & time understood).\n' +
-      '  - "clarify" when you need more details (e.g. missing date/time).\n' +
-      '  - "none" when the user is just chatting.\n' +
-      "- If action.type is \"clarify\", assistant_message MUST ask a follow-up question and action.payload can be an empty object.\n" +
-      "- If action.type is \"none\", you are just chatting and action.payload can be an empty object.\n" +
-      "- When creating a task, fill payload.title, payload.start, payload.end, payload.priority.\n" +
-      "- Use ISO 8601 strings for start/end (e.g. 2026-02-26T17:00:00.000Z).\n" +
-      "- Never include explanations or any text outside the JSON.",
+    content: `You are a scheduling assistant API.
+
+You MUST respond with ONLY valid JSON.
+Do NOT include explanations.
+Do NOT include greetings.
+Do NOT include markdown.
+Do NOT include any text outside JSON.
+
+Your response MUST strictly follow this structure:
+
+{
+  \"assistant_message\": \"string\",
+  \"action\": {
+    \"type\": \"create_task\" | \"clarify\" | \"none\",
+    \"payload\": {
+      \"title\": \"string\",
+      \"start\": \"ISO_DATE_STRING\",
+      \"end\": \"ISO_DATE_STRING\",
+      \"priority\": \"low|medium|high\"
+    }
+  }
+}
+
+If no scheduling action:
+{
+  \"assistant_message\": \"string\",
+  \"action\": { \"type\": \"none\", \"payload\": {} }
+}
+
+If clarification needed:
+{
+  \"assistant_message\": \"string\",
+  \"action\": { \"type\": \"clarify\", \"payload\": {} }
+}
+
+Return JSON only.`,
   });
 
   // Short conversational history (previous 3–5 turns).
@@ -163,7 +175,8 @@ export async function callConversationalSchedulingModel(
     messages,
     stream: false,
     options: {
-      temperature: 0.3,
+      temperature: 0,
+      top_p: 0.1,
     },
   });
 
