@@ -26,6 +26,158 @@ const db = new sqlite3.Database(DB_PATH);
 // Map<userId, Array<{ role: "user" | "assistant", content: string }>>
 const aiConversationHistory = new Map();
 
+// In-memory, per-user pending proposal (decision gate).
+// Map<userId, { type: "task" | "plan", payload: any, createdAt: string }>
+const aiPendingProposal = new Map();
+
+function normalizeUserText(text) {
+  return String(text ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function isConfirmationMessage(text) {
+  const t = normalizeUserText(text);
+  if (!t) return false;
+  // Keep this strict to avoid accidental scheduling from longer messages.
+  if (t.length > 40) return false;
+  return /^(yes|y|yep|yeah|confirm|confirmed|ok|okay|looks good|sounds good|go ahead|do it|schedule it|proceed)( please)?[.!]?$/i.test(
+    t
+  );
+}
+
+function isRejectionMessage(text) {
+  const t = normalizeUserText(text);
+  if (!t) return false;
+  // Also keep strict to avoid wiping proposals when the user is adjusting details.
+  if (t.length > 60) return false;
+  return /^(no|n|nope|cancel|stop|never mind|nevermind|not now|reject)( it)?[.!]?$/i.test(
+    t
+  );
+}
+
+function appendAiHistory(userId, userMessage, assistantMessage) {
+  const existingHistory = aiConversationHistory.get(userId) || [];
+  const updatedHistory = [
+    ...existingHistory,
+    { role: "user", content: String(userMessage ?? "").trim() },
+    { role: "assistant", content: String(assistantMessage ?? "").trim() },
+  ];
+  const trimmedHistory =
+    updatedHistory.length > 10
+      ? updatedHistory.slice(updatedHistory.length - 10)
+      : updatedHistory;
+  aiConversationHistory.set(userId, trimmedHistory);
+  return trimmedHistory;
+}
+
+function isIsoDateString(value) {
+  if (!value || typeof value !== "string") return false;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms);
+}
+
+async function insertTaskForUser(userId, { title, start, end, priority }) {
+  const id = randomUUID();
+  const createdAt = new Date().toISOString();
+  const dueDate = start; // Use task start as due_date for compatibility.
+  const timeSlotStart = start;
+  const timeSlotEnd = end;
+
+  await runQuery(
+    "INSERT INTO tasks (id, user_id, title, description, priority, completed, due_date, created_at, color, reminder_time, time_slot_start, time_slot_end, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    [
+      id,
+      userId,
+      title,
+      null,
+      priority,
+      0,
+      dueDate,
+      createdAt,
+      null,
+      null,
+      timeSlotStart,
+      timeSlotEnd,
+      null,
+    ]
+  );
+
+  return { id };
+}
+
+function buildDefaultSuggestedSlot(now = new Date()) {
+  const isWeekend = (d) => d.getDay() === 0 || d.getDay() === 6;
+  const setDefaultTime = (d) => {
+    d.setSeconds(0, 0);
+    d.setHours(isWeekend(d) ? 10 : 16, 0, 0, 0);
+    return d;
+  };
+
+  let suggestedStart = setDefaultTime(new Date(now));
+  if (now.getTime() > suggestedStart.getTime()) {
+    const nextDay = new Date(now);
+    nextDay.setDate(nextDay.getDate() + 1);
+    suggestedStart = setDefaultTime(nextDay);
+  }
+
+  const suggestedEnd = new Date(suggestedStart.getTime() + 60 * 60 * 1000);
+  return { suggestedStart, suggestedEnd };
+}
+
+function looksLikeLearningPlanRequest(text) {
+  const t = normalizeUserText(text);
+  return /\b(learn|learning|study|timetable|time table|schedule for learning|study plan|learning plan)\b/i.test(
+    t
+  );
+}
+
+function looksLikeBareCreateTaskRequest(text) {
+  const t = normalizeUserText(text);
+  const words = t.split(" ").filter(Boolean);
+  return (
+    /^(create|add|schedule)\s+(a\s+)?task\b/i.test(t) &&
+    words.length <= 4
+  );
+}
+
+function looksLikeTopicOnlyTask(text) {
+  const t = normalizeUserText(text);
+  if (!t) return false;
+  if (looksLikeLearningPlanRequest(t)) return false;
+  if (/^(hi|hello|hey|good morning|good evening|good afternoon)\b/i.test(t)) {
+    return false;
+  }
+  if (looksLikeBareCreateTaskRequest(t)) return false;
+
+  const hasDateOrTimeHints =
+    /\b(today|tomorrow|next|this|on|at|am|pm)\b/i.test(t) ||
+    /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(t) ||
+    /\b(jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\b/i.test(
+      t
+    ) ||
+    /\d{1,2}:\d{2}/.test(t) ||
+    /\b\d{1,2}\b/.test(t);
+
+  if (hasDateOrTimeHints) return false;
+  return t.length >= 6;
+}
+
+function withConfirmationPrompt(message) {
+  const base = String(message ?? "").trim();
+  const suffix = ` Reply "confirm" to schedule it, or tell me what to change.`;
+  if (!base) return suffix.trim();
+  if (/\bconfirm\b/i.test(base) || /reply\s+["']?confirm["']?/i.test(base)) {
+    return base;
+  }
+  // If it already ends with a question, keep it but still include the explicit confirm keyword.
+  if (/[?]\s*$/.test(base)) {
+    return `${base}${suffix}`;
+  }
+  return `${base}${suffix}`;
+}
+
 db.serialize(() => {
   db.run(`
     CREATE TABLE IF NOT EXISTS users (
@@ -611,6 +763,115 @@ app.post("/ai/schedule", authMiddleware, async (req, res) => {
   }
 
   const userId = req.userId;
+  const trimmedUserMessage = message.trim();
+
+  // Decision gate: if there's a pending proposal, only create on explicit confirmation.
+  const pending = aiPendingProposal.get(userId);
+  if (pending) {
+    if (isConfirmationMessage(trimmedUserMessage)) {
+      try {
+        const payload = pending.payload || {};
+        const tasks =
+          pending.type === "plan"
+            ? Array.isArray(payload.tasks)
+              ? payload.tasks
+              : []
+            : [
+                {
+                  title: payload.title,
+                  start: payload.suggested_start,
+                  end: payload.suggested_end,
+                  priority: payload.priority,
+                },
+              ];
+
+        const validTasks = tasks.filter(
+          (t) =>
+            t &&
+            typeof t.title === "string" &&
+            t.title.trim() &&
+            isIsoDateString(t.start) &&
+            isIsoDateString(t.end) &&
+            ["low", "medium", "high"].includes(t.priority)
+        );
+
+        if (validTasks.length === 0) {
+          aiPendingProposal.delete(userId);
+          const msg =
+            "I don't have a valid pending proposal to schedule anymore. What would you like to schedule (title, date, and time)?";
+          appendAiHistory(userId, trimmedUserMessage, msg);
+          return res.json({ success: false, message: msg });
+        }
+
+        for (const t of validTasks) {
+          await insertTaskForUser(userId, t);
+        }
+
+        aiPendingProposal.delete(userId);
+
+        const confirmationMessage =
+          validTasks.length === 1
+            ? `Done — scheduled "${validTasks[0].title}".`
+            : `Done — scheduled ${validTasks.length} tasks.`;
+
+        appendAiHistory(userId, trimmedUserMessage, confirmationMessage);
+        return res.json({
+          success: true,
+          message: confirmationMessage,
+        });
+      } catch (err) {
+        console.error("Confirm proposal -> create task(s) error:", err);
+        return res.status(500).json({
+          success: false,
+          error: "Failed to create task(s) from the confirmed proposal",
+        });
+      }
+    }
+
+    if (isRejectionMessage(trimmedUserMessage)) {
+      aiPendingProposal.delete(userId);
+      const msg =
+        "Okay — I won't schedule that. What would you like to schedule instead (title, date, and time)?";
+      appendAiHistory(userId, trimmedUserMessage, msg);
+      return res.json({ success: false, message: msg });
+    }
+
+    // Any other user message means they're changing details; drop the old pending proposal.
+    aiPendingProposal.delete(userId);
+  }
+
+  // Lightweight deterministic behavior for common cases (reduces model mistakes).
+  if (looksLikeBareCreateTaskRequest(trimmedUserMessage)) {
+    const msg =
+      "Sure — what should I create, and when? Please share the task title plus the date and time (or a time window).";
+    appendAiHistory(userId, trimmedUserMessage, msg);
+    return res.json({ success: false, message: msg });
+  }
+
+  // If the user only provides a topic (no date/time), propose a reasonable default slot.
+  if (looksLikeTopicOnlyTask(trimmedUserMessage)) {
+    const { suggestedStart, suggestedEnd } = buildDefaultSuggestedSlot(new Date());
+    const payload = {
+      title: trimmedUserMessage,
+      suggested_start: suggestedStart.toISOString(),
+      suggested_end: suggestedEnd.toISOString(),
+      priority: "medium",
+    };
+
+    aiPendingProposal.set(userId, {
+      type: "task",
+      payload,
+      createdAt: new Date().toISOString(),
+    });
+
+    const msg =
+      `I can schedule "${payload.title}". I suggest ` +
+      `${suggestedStart.toLocaleString()}–${suggestedEnd.toLocaleTimeString()}. ` +
+      `Reply "confirm" to schedule it, or tell me a different date/time.`;
+
+    appendAiHistory(userId, trimmedUserMessage, msg);
+    return res.json({ success: false, message: msg, requires_confirmation: true });
+  }
 
   // Get the existing history for this user and take the last 5 turns.
   const existingHistory = aiConversationHistory.get(userId) || [];
@@ -619,11 +880,8 @@ app.post("/ai/schedule", authMiddleware, async (req, res) => {
       ? existingHistory.slice(existingHistory.length - 5)
       : existingHistory;
 
-  // Append the new user message to the working history we send to the model.
-  const contextForModel = [
-    ...shortHistory,
-    { role: "user", content: message.trim() },
-  ];
+  // Send short history; the model call will append the current user message.
+  const contextForModel = [...shortHistory];
 
   let raw;
   try {
@@ -671,81 +929,68 @@ app.post("/ai/schedule", authMiddleware, async (req, res) => {
   const action = parsed.action || { type: "none", payload: {} };
 
   // Update in-memory history only after we have a valid assistant message.
-  const updatedHistory = [
-    ...existingHistory,
-    { role: "user", content: message.trim() },
-    { role: "assistant", content: assistantMessage },
-  ];
-  // Keep history short (e.g., last 10 turns).
-  const trimmedHistory =
-    updatedHistory.length > 10
-      ? updatedHistory.slice(updatedHistory.length - 10)
-      : updatedHistory;
-  aiConversationHistory.set(userId, trimmedHistory);
+  appendAiHistory(userId, trimmedUserMessage, assistantMessage);
 
+  // Decision gate enforcement: never schedule immediately from the model.
+  // If the model tried to return create_task, we treat it as a proposal.
   if (action.type === "create_task") {
-    try {
-      const payload = action.payload || {};
-      const { title, start, end, priority } = payload;
+    const payload = action.payload || {};
+    aiPendingProposal.set(userId, {
+      type: "task",
+      payload: {
+        title: payload.title,
+        suggested_start: payload.start,
+        suggested_end: payload.end,
+        priority: payload.priority,
+      },
+      createdAt: new Date().toISOString(),
+    });
 
-      if (
-        !title ||
-        typeof title !== "string" ||
-        !start ||
-        typeof start !== "string" ||
-        !end ||
-        typeof end !== "string" ||
-        !["low", "medium", "high"].includes(priority)
-      ) {
-        return res.status(400).json({
-          success: false,
-          error: "AI create_task payload is missing required fields",
-        });
-      }
+    const msg =
+      assistantMessage.trim().length > 0
+        ? `${assistantMessage.trim()} Reply "confirm" to schedule it, or tell me what to change.`
+        : `I can schedule that. Reply "confirm" to schedule it, or tell me what to change.`;
 
-      const id = randomUUID();
-      const createdAt = new Date().toISOString();
-      const dueDate = start; // Use task start as due_date for compatibility.
-      const timeSlotStart = start;
-      const timeSlotEnd = end;
-
-      await runQuery(
-        "INSERT INTO tasks (id, user_id, title, description, priority, completed, due_date, created_at, color, reminder_time, time_slot_start, time_slot_end, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-          id,
-          userId,
-          title,
-          null,
-          priority,
-          0,
-          dueDate,
-          createdAt,
-          null,
-          null,
-          timeSlotStart,
-          timeSlotEnd,
-          null,
-        ]
-      );
-
-      // Only confirm after the insert succeeds.
-      return res.json({
-        success: true,
-        message: assistantMessage,
-      });
-    } catch (err) {
-      console.error("Create task via /ai/schedule error:", err);
-      return res.status(500).json({
-        success: false,
-        error: "Failed to create task from AI instruction",
-      });
-    }
+    return res.json({
+      success: false,
+      message: msg,
+      requires_confirmation: true,
+    });
   }
 
   if (action.type === "clarify") {
     return res.json({
       success: false,
       clarification: assistantMessage,
+      message: assistantMessage,
+    });
+  }
+
+  if (action.type === "propose_task") {
+    const payload = action.payload || {};
+    aiPendingProposal.set(userId, {
+      type: "task",
+      payload,
+      createdAt: new Date().toISOString(),
+    });
+    return res.json({
+      success: false,
+      message: withConfirmationPrompt(assistantMessage),
+      requires_confirmation: true,
+    });
+  }
+
+  if (action.type === "propose_plan") {
+    const payload = action.payload || {};
+    aiPendingProposal.set(userId, {
+      type: "plan",
+      payload,
+      createdAt: new Date().toISOString(),
+    });
+    return res.json({
+      success: false,
+      message: withConfirmationPrompt(assistantMessage),
+      requires_confirmation: true,
     });
   }
 
@@ -770,11 +1015,21 @@ function validateConversationalAiShape(obj) {
   }
 
   const type = obj.action.type;
-  if (!["create_task", "clarify", "none"].includes(type)) {
-    return { ok: false, error: "action.type must be create_task|clarify|none" };
+  const allowed = [
+    "create_task", // backwards compatibility (server still enforces decision gate)
+    "propose_task",
+    "propose_plan",
+    "clarify",
+    "none",
+  ];
+  if (!allowed.includes(type)) {
+    return {
+      ok: false,
+      error: "action.type must be propose_task|propose_plan|clarify|none (create_task allowed for compatibility)",
+    };
   }
 
-  // Payload is only required for create_task; for others it can be empty.
+  // Payload validation by action type.
   if (type === "create_task") {
     const payload = obj.action.payload;
     if (typeof payload !== "object" || payload === null) {
@@ -798,6 +1053,55 @@ function validateConversationalAiShape(obj) {
         ok: false,
         error: "payload.priority must be low|medium|high",
       };
+    }
+  }
+
+  if (type === "propose_task") {
+    const payload = obj.action.payload;
+    if (typeof payload !== "object" || payload === null) {
+      return { ok: false, error: "action.payload must be an object for propose_task" };
+    }
+    if (typeof payload.title !== "string" || !payload.title.trim()) {
+      return { ok: false, error: "payload.title must be a non-empty string" };
+    }
+    if (typeof payload.suggested_start !== "string" || !payload.suggested_start.trim()) {
+      return { ok: false, error: "payload.suggested_start must be an ISO date string" };
+    }
+    if (typeof payload.suggested_end !== "string" || !payload.suggested_end.trim()) {
+      return { ok: false, error: "payload.suggested_end must be an ISO date string" };
+    }
+    if (!["low", "medium", "high"].includes(payload.priority)) {
+      return { ok: false, error: "payload.priority must be low|medium|high" };
+    }
+  }
+
+  if (type === "propose_plan") {
+    const payload = obj.action.payload;
+    if (typeof payload !== "object" || payload === null) {
+      return { ok: false, error: "action.payload must be an object for propose_plan" };
+    }
+    if (typeof payload.plan_title !== "string" || !payload.plan_title.trim()) {
+      return { ok: false, error: "payload.plan_title must be a non-empty string" };
+    }
+    if (!Array.isArray(payload.tasks) || payload.tasks.length === 0) {
+      return { ok: false, error: "payload.tasks must be a non-empty array" };
+    }
+    for (const t of payload.tasks) {
+      if (typeof t !== "object" || t === null) {
+        return { ok: false, error: "each task in payload.tasks must be an object" };
+      }
+      if (typeof t.title !== "string" || !t.title.trim()) {
+        return { ok: false, error: "plan task.title must be a non-empty string" };
+      }
+      if (typeof t.start !== "string" || !t.start.trim()) {
+        return { ok: false, error: "plan task.start must be an ISO date string" };
+      }
+      if (typeof t.end !== "string" || !t.end.trim()) {
+        return { ok: false, error: "plan task.end must be an ISO date string" };
+      }
+      if (!["low", "medium", "high"].includes(t.priority)) {
+        return { ok: false, error: "plan task.priority must be low|medium|high" };
+      }
     }
   }
 
