@@ -78,6 +78,197 @@ function isIsoDateString(value) {
   return Number.isFinite(ms);
 }
 
+function textContainsDateOrTimeExpressions(text) {
+  const t = normalizeUserText(text);
+  if (!t) return false;
+
+  const hasRelative =
+    /\b(today|tomorrow)\b/i.test(t) ||
+    /\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i.test(t);
+
+  const hasNumericDate =
+    /\b\d{4}-\d{1,2}-\d{1,2}\b/.test(t) || // 2026-02-27
+    /\b\d{1,2}[\/\-\.]\d{1,2}([\/\-\.]\d{2,4})\b/.test(t); // 27/2/26, 27-02-2026
+
+  const hasTime =
+    /\b\d{1,2}:\d{2}\s*(am|pm)?\b/i.test(t) || // 17:00, 5:00pm
+    /\b\d{1,2}\s*(am|pm)\b/i.test(t); // 5pm, 10 am
+
+  return hasRelative || hasNumericDate || hasTime;
+}
+
+function parseTimeFromText(text) {
+  const raw = String(text ?? "");
+  const t = raw.toLowerCase();
+
+  // 17:00 or 5:00 pm
+  let m = t.match(/\b(\d{1,2})\s*:\s*(\d{2})\s*(am|pm)?\b/i);
+  if (m) {
+    let hour = Number(m[1]);
+    const minute = Number(m[2]);
+    const ampm = m[3] ? String(m[3]).toLowerCase() : null;
+    if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+    if (minute < 0 || minute > 59) return null;
+    if (ampm) {
+      if (hour < 1 || hour > 12) return null;
+      if (ampm === "pm" && hour !== 12) hour += 12;
+      if (ampm === "am" && hour === 12) hour = 0;
+    } else {
+      if (hour < 0 || hour > 23) return null;
+    }
+    return { hour, minute };
+  }
+
+  // 5pm or 10 am
+  m = t.match(/\b(\d{1,2})\s*(am|pm)\b/i);
+  if (m) {
+    let hour = Number(m[1]);
+    const minute = 0;
+    const ampm = String(m[2]).toLowerCase();
+    if (!Number.isFinite(hour)) return null;
+    if (hour < 1 || hour > 12) return null;
+    if (ampm === "pm" && hour !== 12) hour += 12;
+    if (ampm === "am" && hour === 12) hour = 0;
+    return { hour, minute };
+  }
+
+  return null;
+}
+
+function parseDateFromText(text, now = new Date()) {
+  const raw = String(text ?? "");
+  const t = normalizeUserText(raw);
+  if (!t) return null;
+
+  if (/\btoday\b/i.test(t)) {
+    return { kind: "absolute", date: new Date(now.getFullYear(), now.getMonth(), now.getDate()), explicitToday: true };
+  }
+  if (/\btomorrow\b/i.test(t)) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    d.setDate(d.getDate() + 1);
+    return { kind: "absolute", date: d, explicitToday: false };
+  }
+
+  const weekdayMatch = t.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/i);
+  if (weekdayMatch) {
+    const target = weekdayMatch[1].toLowerCase();
+    const map = {
+      sunday: 0,
+      monday: 1,
+      tuesday: 2,
+      wednesday: 3,
+      thursday: 4,
+      friday: 5,
+      saturday: 6,
+    };
+    const targetDow = map[target];
+    const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const currentDow = base.getDay();
+    let delta = targetDow - currentDow;
+    if (delta < 0) delta += 7;
+    // If user says "monday" and it's already monday, treat as today (delta 0).
+    const d = new Date(base);
+    d.setDate(d.getDate() + delta);
+    return { kind: "absolute", date: d, explicitToday: false };
+  }
+
+  // ISO-like: 2026-02-27
+  let m = t.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
+  if (m) {
+    const y = Number(m[1]);
+    const mo = Number(m[2]);
+    const da = Number(m[3]);
+    if (y >= 1970 && mo >= 1 && mo <= 12 && da >= 1 && da <= 31) {
+      return { kind: "absolute", date: new Date(y, mo - 1, da), explicitToday: false };
+    }
+  }
+
+  // D/M/YY(YY) or D-M-YYYY etc. Assume D/M when ambiguous (common in this locale).
+  m = t.match(/\b(\d{1,2})[\/\-\.](\d{1,2})(?:[\/\-\.](\d{2,4}))\b/);
+  if (m) {
+    const d1 = Number(m[1]);
+    const d2 = Number(m[2]);
+    const yRaw = Number(m[3]);
+    let year = yRaw;
+    if (year < 100) year = 2000 + year; // 26 -> 2026
+    let day = d1;
+    let month = d2;
+
+    // If clearly MM/DD (e.g. 2/27/2026), swap.
+    if (d1 <= 12 && d2 > 12) {
+      month = d1;
+      day = d2;
+    }
+
+    if (year >= 1970 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return { kind: "absolute", date: new Date(year, month - 1, day), explicitToday: false };
+    }
+  }
+
+  return null;
+}
+
+function formatTimeRange(start, end) {
+  const timeOpts = { hour: "numeric", minute: "2-digit" };
+  const dateStr = start.toLocaleDateString();
+  const startTime = start.toLocaleTimeString([], timeOpts);
+  const endTime = end.toLocaleTimeString([], timeOpts);
+  return { dateStr, startTime, endTime };
+}
+
+function tryUpdatePendingTaskProposalFromUserMessage(pending, userMessage, now = new Date()) {
+  if (!pending || pending.type !== "task") return { ok: false };
+  const payload = pending.payload || {};
+  if (
+    typeof payload.title !== "string" ||
+    !payload.title.trim() ||
+    !isIsoDateString(payload.suggested_start) ||
+    !isIsoDateString(payload.suggested_end) ||
+    !["low", "medium", "high"].includes(payload.priority)
+  ) {
+    return { ok: false };
+  }
+
+  if (!textContainsDateOrTimeExpressions(userMessage)) return { ok: false };
+
+  const prevStart = new Date(payload.suggested_start);
+  const prevEnd = new Date(payload.suggested_end);
+  const durationMs = Math.max(30 * 60 * 1000, prevEnd.getTime() - prevStart.getTime() || 60 * 60 * 1000);
+
+  const parsedTime = parseTimeFromText(userMessage);
+  const parsedDate = parseDateFromText(userMessage, now);
+
+  if (!parsedTime && !parsedDate) return { ok: false };
+
+  let baseDate = parsedDate?.date
+    ? new Date(parsedDate.date.getFullYear(), parsedDate.date.getMonth(), parsedDate.date.getDate())
+    : new Date(prevStart.getFullYear(), prevStart.getMonth(), prevStart.getDate());
+
+  const hour = parsedTime ? parsedTime.hour : prevStart.getHours();
+  const minute = parsedTime ? parsedTime.minute : prevStart.getMinutes();
+
+  let newStart = new Date(baseDate);
+  newStart.setHours(hour, minute, 0, 0);
+
+  // If user explicitly said "today" but the chosen time already passed, roll to tomorrow.
+  if (parsedDate?.explicitToday && newStart.getTime() < now.getTime()) {
+    const bumped = new Date(newStart);
+    bumped.setDate(bumped.getDate() + 1);
+    newStart = bumped;
+  }
+
+  const newEnd = new Date(newStart.getTime() + durationMs);
+
+  const updatedPayload = {
+    title: payload.title,
+    suggested_start: newStart.toISOString(),
+    suggested_end: newEnd.toISOString(),
+    priority: payload.priority,
+  };
+
+  return { ok: true, updatedPayload, newStart, newEnd };
+}
+
 async function insertTaskForUser(userId, { title, start, end, priority }) {
   const id = randomUUID();
   const createdAt = new Date().toISOString();
@@ -836,7 +1027,33 @@ app.post("/ai/schedule", authMiddleware, async (req, res) => {
       return res.json({ success: false, message: msg });
     }
 
-    // Any other user message means they're changing details; drop the old pending proposal.
+    // If user is modifying date/time, update the pending proposal without calling the model.
+    const updated = tryUpdatePendingTaskProposalFromUserMessage(
+      pending,
+      trimmedUserMessage,
+      new Date()
+    );
+    if (updated.ok) {
+      aiPendingProposal.set(userId, {
+        type: "task",
+        payload: updated.updatedPayload,
+        createdAt: new Date().toISOString(),
+      });
+
+      const { dateStr, startTime, endTime } = formatTimeRange(
+        updated.newStart,
+        updated.newEnd
+      );
+      const msg = `I can schedule "${updated.updatedPayload.title}" on ${dateStr} at ${startTime}–${endTime}. Reply "confirm" to schedule it, or tell me what to change.`;
+      appendAiHistory(userId, trimmedUserMessage, msg);
+      return res.json({
+        success: false,
+        message: msg,
+        requires_confirmation: true,
+      });
+    }
+
+    // If it's unrelated (neither confirm/reject nor a date/time modification), drop the old pending proposal.
     aiPendingProposal.delete(userId);
   }
 
