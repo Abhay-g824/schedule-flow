@@ -876,8 +876,8 @@ app.post("/ai/schedule", authMiddleware, async (req, res) => {
   // Get the existing history for this user and take the last 5 turns.
   const existingHistory = aiConversationHistory.get(userId) || [];
   const shortHistory =
-    existingHistory.length > 5
-      ? existingHistory.slice(existingHistory.length - 5)
+    existingHistory.length > 3
+      ? existingHistory.slice(existingHistory.length - 3)
       : existingHistory;
 
   // Send short history; the model call will append the current user message.
@@ -894,34 +894,35 @@ app.post("/ai/schedule", authMiddleware, async (req, res) => {
     });
   }
 
-  let parsed;
+  let parsed = null;
+
   try {
-    // Safely extract the first JSON object from the LLM response before parsing.
     const rawString = String(raw ?? "").trim();
+    const firstBrace = rawString.indexOf("{");
+    const lastBrace = rawString.lastIndexOf("}");
 
-    // Extract first JSON object from response
-    const jsonMatch = rawString.match(/\{[\s\S]*\}/);
-
-    if (!jsonMatch) {
-      console.error("No JSON found in LLM response:", rawString);
-      throw new Error("Invalid LLM response format");
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      const candidate = rawString.slice(firstBrace, lastBrace + 1);
+      parsed = JSON.parse(candidate);
     }
-
-    parsed = JSON.parse(jsonMatch[0]);
   } catch (err) {
-    console.error("JSON parse error:", err, "RAW:", raw);
-    return res.status(500).json({
+    console.error("LLM JSON parse failed:", err);
+  }
+
+  if (parsed === null) {
+    return res.json({
       success: false,
-      error: "AI returned invalid JSON",
+      message:
+        "I didn’t fully understand that. Could you rephrase with a clear task, date, and time?",
     });
   }
 
   const validation = validateConversationalAiShape(parsed);
   if (!validation.ok) {
     console.error("AI JSON failed shape validation:", validation.error);
-    return res.status(500).json({
+    return res.json({
       success: false,
-      error: "AI returned JSON in unexpected format",
+      message: "I need a bit more clarity. Please provide task title, date, and time.",
     });
   }
 
