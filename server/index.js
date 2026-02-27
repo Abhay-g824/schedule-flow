@@ -317,9 +317,17 @@ function buildDefaultSuggestedSlot(now = new Date()) {
   return { suggestedStart, suggestedEnd };
 }
 
+function looksLikeGreeting(text) {
+  const t = normalizeUserText(text);
+  if (!t) return false;
+  return /^(hi|hello|hey|yo|good morning|good evening|good afternoon|howdy|hiya)\b/i.test(
+    t
+  );
+}
+
 function looksLikeLearningPlanRequest(text) {
   const t = normalizeUserText(text);
-  return /\b(learn|learning|study|timetable|time table|schedule for learning|study plan|learning plan)\b/i.test(
+  return /\b(learn|learning|study|timetable|time table|schedule for learning|study plan|learning plan|gym|workout|work out|fitness|training|exercise|chest week|push pull legs|ppl|weekly workout|workout plan|gym plan)\b/i.test(
     t
   );
 }
@@ -1027,6 +1035,46 @@ app.post("/ai/schedule", authMiddleware, async (req, res) => {
       return res.json({ success: false, message: msg });
     }
 
+    // If the user greets while a proposal is pending, keep context and ask for confirmation or changes.
+    if (looksLikeGreeting(trimmedUserMessage)) {
+      if (pending.type === "task") {
+        const payload = pending.payload || {};
+        if (
+          payload &&
+          typeof payload.title === "string" &&
+          payload.title.trim() &&
+          isIsoDateString(payload.suggested_start) &&
+          isIsoDateString(payload.suggested_end)
+        ) {
+          const start = new Date(payload.suggested_start);
+          const end = new Date(payload.suggested_end);
+          const { dateStr, startTime, endTime } = formatTimeRange(start, end);
+          const msg = `Hi! You're currently scheduling "${payload.title}" on ${dateStr} at ${startTime}–${endTime}. Reply "confirm" to schedule it, or tell me what to change.`;
+          appendAiHistory(userId, trimmedUserMessage, msg);
+          return res.json({
+            success: false,
+            message: msg,
+            requires_confirmation: true,
+          });
+        }
+      }
+
+      if (pending.type === "plan") {
+        const payload = pending.payload || {};
+        const planTitle =
+          payload && typeof payload.plan_title === "string" && payload.plan_title.trim()
+            ? payload.plan_title.trim()
+            : "your weekly plan";
+        const msg = `Hi! I have a pending proposal for "${planTitle}". Reply "confirm" to schedule it, or tell me what you'd like to adjust (days/times).`;
+        appendAiHistory(userId, trimmedUserMessage, msg);
+        return res.json({
+          success: false,
+          message: msg,
+          requires_confirmation: true,
+        });
+      }
+    }
+
     // If user is modifying date/time, update the pending proposal without calling the model.
     const updated = tryUpdatePendingTaskProposalFromUserMessage(
       pending,
@@ -1055,6 +1103,15 @@ app.post("/ai/schedule", authMiddleware, async (req, res) => {
 
     // If it's unrelated (neither confirm/reject nor a date/time modification), drop the old pending proposal.
     aiPendingProposal.delete(userId);
+  }
+
+  // Handle greetings without calling the model (prevents JSON/validation loops).
+  if (looksLikeGreeting(trimmedUserMessage)) {
+    const msg =
+      `Hi! What would you like to schedule? ` +
+      `You can say something like "project meeting tomorrow at 5pm" or "plan a chest week for this week".`;
+    appendAiHistory(userId, trimmedUserMessage, msg);
+    return res.json({ success: false, message: msg });
   }
 
   // Lightweight deterministic behavior for common cases (reduces model mistakes).
@@ -1098,7 +1155,9 @@ app.post("/ai/schedule", authMiddleware, async (req, res) => {
       : existingHistory;
 
   // Send short history; the model call will append the current user message.
-  const contextForModel = [...shortHistory];
+  const contextForModel = looksLikeLearningPlanRequest(trimmedUserMessage)
+    ? []
+    : [...shortHistory];
 
   let raw;
   try {
@@ -1114,7 +1173,8 @@ app.post("/ai/schedule", authMiddleware, async (req, res) => {
   let parsed = null;
 
   try {
-    const rawString = String(raw ?? "").trim();
+    const rawString =
+      typeof raw === "string" ? raw.trim() : JSON.stringify(raw ?? {}).trim();
     const firstBrace = rawString.indexOf("{");
     const lastBrace = rawString.lastIndexOf("}");
 
